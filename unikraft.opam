@@ -19,6 +19,6 @@ install: [
 ]
 dev-repo: "git+https://github.com/unikraft/unikraft.git"
 available:
-  os = "linux" &
+  (os = "linux" | os = "macos") &
   (arch = "arm64" | arch = "x86_64" | arch = "s390x" | arch = "riscv64" |
    arch = "ppc64")
