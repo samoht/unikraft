@@ -17,6 +17,7 @@ install: [
   ["rm" "-rf" ".github" ".gitignore"]
   ["cp" "-r" "." "%{_:lib}%"]
 ]
+remove: [ ["rm" "-rf" "%{_:lib}%"] ]
 depexts: [
   # Unikraft's Makefile uses the GNU tools on macOS (ggrep, greadlink, gdirname)
   ["grep" "coreutils"] {os = "macos" & os-distribution = "homebrew"}
