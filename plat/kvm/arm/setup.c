@@ -167,15 +167,17 @@ void __no_pauth _ukplat_entry(void)
 		uk_pr_err("ACPI init failed: %d\n", rc);
 #endif /* CONFIG_UKPLAT_ACPI */
 
+	/* Initialize logical boot CPU first: it sets tpidr_el1, which the GICv3
+	 * redistributor access (lcpu_get_current) needs during the interrupt
+	 * controller probe below. */
+	rc = lcpu_init(lcpu_get_bsp());
+	if (unlikely(rc))
+		UK_CRASH("Failed to initialize bootstrapping CPU: %d\n", rc);
+
 	/* Initialize interrupt controller */
 	rc = uk_intctlr_probe();
 	if (unlikely(rc))
 		UK_CRASH("Could not initialize the IRQ controller: %d\n", rc);
-
-	/* Initialize logical boot CPU */
-	rc = lcpu_init(lcpu_get_bsp());
-	if (unlikely(rc))
-		UK_CRASH("Failed to initialize bootstrapping CPU: %d\n", rc);
 
 #ifdef CONFIG_HAVE_SMP
 	rc = lcpu_mp_init(CONFIG_UKPLAT_LCPU_RUN_IRQ,
