@@ -227,17 +227,17 @@ int lcpu_fn_enqueue(struct lcpu *lcpu, const struct ukplat_lcpu_func *fn)
 	if (old_fn != NULL)
 		return -EAGAIN;
 
+	/* Publish the user argument BEFORE claiming the fn.fn slot, so a poller
+	 * that observes fn.fn set also sees the matching user. The SGI path is
+	 * unaffected because the run IRQ is raised only after this returns.
+	 */
+	lcpu->fn.user = fn->user;
+	wmb();
+
 	/* It is empty, try to store the function */
 	if (uk_compare_exchange_sync(&lcpu->fn.fn, old_fn,
 					 fn->fn) != fn->fn)
 		return -EAGAIN;
-
-	/* We have acquired the slot! Also store the user argument.
-	 * It is safe to do it afterwards, because the RUN IRQ handler will
-	 * only take one function and return afterwards. And we only raise the
-	 * IRQ after finishing setup.
-	 */
-	lcpu->fn.user = fn->user;
 
 	/* Ensure everything is written back when we return and the arch
 	 * support code will raise the IRQ
@@ -361,15 +361,25 @@ void __weak __noreturn lcpu_entry_default(struct lcpu *this_lcpu)
 		 */
 		uk_dec(&this_lcpu->state);
 
-		/* Enable IRQs. If there are functions queued we will
-		 * immediately jump to the IRQ handler.
+		/* Keep IRQs masked. A polled worker core services its run
+		 * slot by spinning, not via the run IPI, so it needs no
+		 * interrupts; leaving them enabled lets a stray timer IRQ
+		 * livelock the secondary in its vector before it polls.
 		 */
-		ukplat_lcpu_enable_irq();
+		ukplat_lcpu_disable_irq();
 		while (1) {
-			/* Besides interrupts in general, the halt can be
-			 * interrupted by calls to ukplat_lcpu_run().
+			/* Spin-poll the run slot rather than relying solely on
+			 * the run IPI: SGI delivery to secondaries is unreliable
+			 * on this config, and a dedicated worker core can afford
+			 * to spin. This mirrors lcpu_ipi_run_handler.
 			 */
-			halt();
+			if (uk_load_n(&this_lcpu->fn.fn)) {
+				struct ukplat_lcpu_func fn = this_lcpu->fn;
+				rmb();
+				this_lcpu->fn.fn = NULL;
+				fn.fn(NULL, fn.user);
+				uk_dec(&this_lcpu->state);
+			}
 		}
 	}
 }

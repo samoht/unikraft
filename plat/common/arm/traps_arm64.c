@@ -196,8 +196,29 @@ void invalid_trap_handler(struct __regs *regs, __u32 el, __u32 reason,
 void trap_el1_sync(struct __regs *regs, __u64 far)
 {
 	int rc;
-	struct ukarch_trap_ctx ctx = {regs, regs->esr_el1, 1, 0, far};
-	enum aarch64_trap trap = esr_to_trap(regs->esr_el1);
+	struct ukarch_trap_ctx ctx;
+	enum aarch64_trap trap;
+
+	/* FP/SIMD access trap: enable FP/SIMD (CPACR_EL1.FPEN=0b11) and retry the
+	 * instruction. FP is meant to be always-on (the boot core sets it once),
+	 * but a secondary lcpu can reach here with FPEN still cleared -- e.g. in a
+	 * debug print, which uses SIMD. Treating it as fatal recurses, because the
+	 * crash dump below itself uses SIMD; enabling FP and returning is the
+	 * always-on model applied lazily, needing no per-thread FP context. Handle
+	 * it before touching anything that might use SIMD (ctx init, events). */
+	if (ESR_EC_FROM(regs->esr_el1) == ESR_EL1_EC_SVE_ASIMD_FP_ACC) {
+		__asm__ volatile("mrs x0, cpacr_el1\n\t"
+				 "orr x0, x0, #(3 << 20)\n\t"
+				 "msr cpacr_el1, x0\n\t"
+				 "isb"
+				 :
+				 :
+				 : "x0", "memory");
+		return;
+	}
+
+	ctx = (struct ukarch_trap_ctx){regs, regs->esr_el1, 1, 0, far};
+	trap = esr_to_trap(regs->esr_el1);
 
 	if (trap < AARCH64_TRAP_MAX) {
 		rc = uk_raise_event_ptr(_trap_table[trap].event, &ctx);

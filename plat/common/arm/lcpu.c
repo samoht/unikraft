@@ -45,6 +45,13 @@
 
 #define CPU_ID_MASK 0xff00ffffffUL
 
+/* Runtime TTBR0 for secondary CPUs. start_mmu loads the early boot page
+ * tables, but ukvmem remaps the heap/stacks/app memory into a runtime table;
+ * a secondary must switch to it after enabling the MMU or it faults on its
+ * stack. Set from the boot core (its current ttbr0_el1) before starting
+ * secondaries; lcpu_start.S reads it. 0 means "keep the boot tables". */
+__u64 secondary_runtime_ttbr0 = 0;
+
 /*
  *  CPU_EXCEPT_STACK_SIZE  CPU_EXCEPT_STACK_SIZE  CPU_EXCEPT_STACK_SIZE
  *<--------------------><---------------------><-------------------->
@@ -122,14 +129,20 @@ int lcpu_arch_init(struct lcpu *this_lcpu)
 	__uptr except_sp;
 	int ret = 0;
 
+	/* Set tpidr_el1 first: on a secondary core the GICv3 redistributor
+	 * access (GIC_RDIST_REG uses lcpu_get_current()->idx) reads it during
+	 * the interrupt controller init below, so it must already point at this
+	 * CPU -- otherwise the secondary wakes the wrong redistributor and never
+	 * receives IPIs. */
+	SYSREG_WRITE64(tpidr_el1, (__uptr)this_lcpu);
+
+
 	/* Initialize the interrupt controller for non-bsp cores */
 	if (!lcpu_is_bsp(this_lcpu)) {
 		ret = gic->ops.initialize();
 		if (unlikely(ret))
 			return ret;
 	}
-
-	SYSREG_WRITE64(tpidr_el1, (__uptr)this_lcpu);
 
 	except_sp = (__uptr)&lcpu_except_stack[this_lcpu->idx *
 					       CPU_EXCEPT_STACK_SIZE * 3];
@@ -338,6 +351,11 @@ int lcpu_arch_mp_init(void *arg)
 
 int lcpu_arch_start(struct lcpu *lcpu, unsigned long flags __unused)
 {
+	/* Capture the caller's (runtime) TTBR0 so the secondary can switch to
+	 * it after enabling the MMU (see lcpu_start.S). start_mmu only loads the
+	 * early boot tables, which do not map the runtime heap/stacks. */
+	secondary_runtime_ttbr0 = SYSREG_READ64(ttbr0_el1);
+
 	return cpu_on(lcpu->id, lcpu_start_paddr, lcpu);
 }
 
