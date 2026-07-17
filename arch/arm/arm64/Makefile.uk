@@ -5,6 +5,9 @@
 # flag to force GCC to use generic registers
 ifeq ($(CONFIG_FPSIMD),y)
 ARCHFLAGS     += -D__ARM_64__
+ARCHFLAGS     += -Wno-int-conversion -Wno-incompatible-pointer-types -std=gnu11
+ISR_ARCHFLAGS += -Wno-int-conversion -Wno-incompatible-pointer-types -std=gnu11
+
 else
 ARCHFLAGS     += -D__ARM_64__ -mgeneral-regs-only
 endif
