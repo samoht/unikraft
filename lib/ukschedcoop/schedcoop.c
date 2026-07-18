@@ -69,27 +69,36 @@ static void schedcoop_schedule(struct uk_sched *s)
 	prev->exec_time += now - c->ts_prev_switch;
 	c->ts_prev_switch = now;
 
-	/* Examine all sleeping threads.
-	 * Wake up expired ones and find the time when the next timeout expires.
-	 */
+	/* Guard the sleep and run queues against a concurrent cross-core wake
+	 * (schedcoop_thread_woken_isr / thread_blocked from another CPU). The whole
+	 * scan-and-select runs under the lock so a busy-poll worker's queues are
+	 * never read here while another CPU mutates them. */
+	if (c->busy_poll)
+		ukarch_spin_lock(&c->lock);
+
+	/* Examine all sleeping threads. Wake up expired ones and find the time
+	 * when the next timeout expires. The wake is inlined (rather than calling
+	 * uk_thread_wake, which would re-enter this lock via the woken path) so it
+	 * stays inside the critical section. */
 	min_wakeup_time = 0;
 	UK_TAILQ_FOREACH_SAFE(thread, &c->sleep_queue,
 			      queue, tmp) {
 		if (likely(thread->wakeup_time)) {
-			if (thread->wakeup_time <= now)
-				uk_thread_wake(thread);
-			else if (!min_wakeup_time
+			if (thread->wakeup_time <= now) {
+				uk_thread_set_runnable(thread);
+				UK_TAILQ_REMOVE(&c->sleep_queue, thread, queue);
+				if (uk_thread_is_queueable(thread)) {
+					UK_TAILQ_INSERT_TAIL(&c->run_queue,
+							     thread, queue);
+					uk_thread_clear_queueable(thread);
+				}
+				thread->wakeup_time = 0;
+			} else if (!min_wakeup_time
 				 || thread->wakeup_time < min_wakeup_time)
 				min_wakeup_time = thread->wakeup_time;
 		}
 	}
 
-	/* Guard the run queue against a concurrent cross-core wake
-	 * (schedcoop_thread_woken_isr inserting from another CPU). Taken after
-	 * the sleep-queue scan above, which calls uk_thread_wake -> the same
-	 * locking woken path, so the lock is never held reentrantly here. */
-	if (c->busy_poll)
-		ukarch_spin_lock(&c->lock);
 	next = UK_TAILQ_FIRST(&c->run_queue);
 	if (next) {
 		UK_ASSERT(next != prev);
