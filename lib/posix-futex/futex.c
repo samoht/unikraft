@@ -102,33 +102,39 @@ static int futex_wait(uint32_t *uaddr, uint32_t val, const __nsec *timeout)
 	struct uk_thread *current = uk_thread_current();
 	struct uk_futex f = {.uaddr = uaddr, .thread = current};
 
+	/* Enqueue on the wait list and re-check the futex word under the same
+	 * lock futex_wake takes, then mark ourselves blocked before releasing it.
+	 * On SMP this closes a lost-wakeup race: a wake on another CPU stores the
+	 * new value and then walks the wait list, both under futex_list_lock, so
+	 * relative to us it is ordered either
+	 *   - before our enqueue: our re-check below sees the changed value and we
+	 *     do not block; or
+	 *   - after our enqueue+block: it finds our entry and wakes us.
+	 * The original checked the word before enqueuing, leaving a window where a
+	 * wake between the check and the enqueue was missed and the thread blocked
+	 * forever -- invisible on a cooperative single core, fatal under real SMP. */
+	irqf = ukplat_lcpu_save_irqf();
+	uk_spin_lock(&futex_list_lock);
+
 	if (uk_load_n(uaddr) != val) {
+		uk_spin_unlock(&futex_list_lock);
+		ukplat_lcpu_restore_irqf(irqf);
 		uk_pr_debug("FUTEX_WAIT: Condition not met (*uaddr != %"PRIu32", uaddr: %p)\n",
 			    val, uaddr);
 		return -EAGAIN;
 	}
 
-	/* Futex word _does_ contain expected val */
 	uk_pr_debug("FUTEX_WAIT: Condition met (*uaddr == %"PRIu32", uaddr: %p)\n",
 			val, uaddr);
-
-	/* Enqueue thread to wait list */
-	irqf = ukplat_lcpu_save_irqf();
-	uk_spin_lock(&futex_list_lock);
 	uk_list_add_tail(&f.list_node, &futex_list);
+
+	if (timeout)
+		uk_thread_block_until(current, (__snsec) (*timeout));
+	else
+		uk_thread_block(current);
+
 	uk_spin_unlock(&futex_list_lock);
 	ukplat_lcpu_restore_irqf(irqf);
-
-	if (timeout) {
-		/* Block at most until `timeout` nanosecs */
-		uk_pr_debug("FUTEX_WAIT: Wait %"__PRIsnsec" nsec for wake-up\n",
-				(__snsec) (*timeout));
-		uk_thread_block_until(current, (__snsec) (*timeout));
-	} else {
-		/* Block indefinitely */
-		uk_pr_debug("FUTEX_WAIT: Wait indefinitely for wake-up\n");
-		uk_thread_block(current);
-	}
 	uk_sched_yield();
 
 	uk_pr_debug("FUTEX_WAIT: Woke up (uaddr: %p)\n", uaddr);
