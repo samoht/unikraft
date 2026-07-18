@@ -28,6 +28,7 @@
 #include <uk/plat/bootstrap.h>
 #include <kvm/efi.h>
 #include <uk/plat/common/bootinfo.h>
+#include <uk/plat/common/lcpu.h>
 
 static void cpu_halt(void) __noreturn;
 
@@ -57,6 +58,14 @@ static void uk_efi_rs_reset_system(enum uk_efi_reset_type reset_type __unused)
 void ukplat_terminate(enum ukplat_gstate request)
 {
 	uk_pr_info("Unikraft halted\n");
+
+#if CONFIG_HAVE_SMP
+	/* Leave this core the only one running before the machine goes away,
+	 * so no secondary is still reading memory as the platform tears it
+	 * down.
+	 */
+	lcpu_quiesce_others();
+#endif /* CONFIG_HAVE_SMP */
 
 	switch (request) {
 	case UKPLAT_RESTART:

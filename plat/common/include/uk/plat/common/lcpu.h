@@ -214,6 +214,29 @@ static inline int lcpu_state_is_busy(int state)
  *    idx initialized; NULL on failure.
  */
 struct lcpu *lcpu_alloc(__lcpuid id);
+
+/**
+ * Park every logical CPU other than the caller, and wait for them to stop
+ * executing. Call this before powering the machine off: a polled worker core
+ * reads its run slot from memory forever, and a core still doing that while
+ * the platform tears the machine down keeps issuing memory accesses against
+ * hardware that is going away. On return, the caller is the only core still
+ * running. Parked cores cannot be restarted.
+ *
+ * The wait is bounded, so a wedged core delays the shutdown rather than
+ * blocking it; such a core is reported with a warning.
+ */
+void lcpu_quiesce_others(void);
+
+/**
+ * Whether a core has asked every other core to park (see
+ * lcpu_quiesce_others()). Polling loops that run on a secondary CPU must check
+ * this and call ukplat_lcpu_halt() when it reads non-zero, otherwise they keep
+ * the CPU running through the shutdown.
+ *
+ * @return non-zero once parking has been requested
+ */
+int lcpu_quiesce_requested(void);
 #endif /* CONFIG_HAVE_SMP */
 
 /**

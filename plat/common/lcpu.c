@@ -192,6 +192,60 @@ static void __noreturn lcpu_halt(struct lcpu *this_cpu, int error_code)
 	}
 }
 
+#if CONFIG_HAVE_SMP
+/* Raised once, by the core that is bringing the system down, to take every
+ * other core out of its polling loop. Polled worker cores read their run slot
+ * from memory forever; a core still doing that while the platform powers the
+ * machine off keeps issuing memory accesses against a machine that is being
+ * torn down under it. Parking them in halt() first leaves exactly one core
+ * running at power-off.
+ */
+static volatile int lcpu_quiesce_request;
+
+int lcpu_quiesce_requested(void)
+{
+	return uk_load_n(&lcpu_quiesce_request);
+}
+
+/* Bounded so a core that is wedged (spinning with IRQs masked in a fault
+ * handler, say) delays shutdown but cannot prevent it: shutting down late is
+ * better than not shutting down at all.
+ */
+#define LCPU_QUIESCE_SPINS	100000000UL
+
+void lcpu_quiesce_others(void)
+{
+	struct lcpu *lcpu;
+	__lcpuidx idx;
+	unsigned long spins;
+	int state;
+
+	uk_store_n(&lcpu_quiesce_request, 1);
+
+	for (idx = 0; idx < ukplat_lcpu_count(); idx++) {
+		lcpu = lcpu_get(idx);
+		if (lcpu == lcpu_get_current())
+			continue;
+
+		for (spins = 0; spins < LCPU_QUIESCE_SPINS; spins++) {
+			state = uk_load_n(&lcpu->state);
+			/* A core that never started, or already halted, is
+			 * not executing and needs no waiting for.
+			 */
+			if (state == LCPU_STATE_OFFLINE ||
+			    state == LCPU_STATE_HALTED)
+				break;
+
+			ukarch_spinwait();
+		}
+
+		if (unlikely(spins == LCPU_QUIESCE_SPINS))
+			uk_pr_warn("lcpu %u did not quiesce\n",
+				   (unsigned int)idx);
+	}
+}
+#endif /* CONFIG_HAVE_SMP */
+
 void __noreturn ukplat_lcpu_halt(void)
 {
 	lcpu_halt(lcpu_get_current(), 0);
@@ -368,6 +422,13 @@ void __weak __noreturn lcpu_entry_default(struct lcpu *this_lcpu)
 		 */
 		ukplat_lcpu_disable_irq();
 		while (1) {
+			/* Stop polling once the system is coming down, so that
+			 * no core is reading memory while the platform powers
+			 * the machine off. Does not return.
+			 */
+			if (unlikely(lcpu_quiesce_requested()))
+				lcpu_halt(this_lcpu, 0);
+
 			/* Spin-poll the run slot rather than relying solely on
 			 * the run IPI: SGI delivery to secondaries is unreliable
 			 * on this config, and a dedicated worker core can afford
