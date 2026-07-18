@@ -53,6 +53,8 @@
 #include <uk/print.h>
 #include <uk/assert.h>
 #include <uk/list.h>
+#include <uk/arch/spinlock.h>
+#include <uk/plat/lcpu.h>
 #include <uk/page.h>
 
 struct chunk_head {
@@ -82,6 +84,12 @@ struct uk_bbpalloc {
 	unsigned long nr_free_pages;
 	struct uk_hlist_head free_head[FREELIST_SIZE];
 	struct uk_bbpalloc_memr *memr_head;
+	/* Serializes free-list operations across CPUs. The allocator is
+	 * otherwise not SMP-safe: a secondary lcpu allocating (e.g. an OCaml
+	 * domain's heap) concurrently with the boot core corrupts the free
+	 * lists (uk_hlist_del on a half-updated head). IRQ-safe so an
+	 * allocating IRQ handler on the same CPU cannot self-deadlock. */
+	__spinlock lock;
 };
 
 #if CONFIG_LIBUKALLOCBBUDDY_FREELIST_SANITY
@@ -359,10 +367,14 @@ static void *bbuddy_palloc(struct uk_alloc *a, unsigned long num_pages)
 {
 	struct uk_bbpalloc *const b = (struct uk_bbpalloc *)&a->priv;
 	struct chunk_head *alloc_ch;
+	unsigned long flags;
 	size_t ord;
 
 	UK_ASSERT(a);
 	UK_ASSERT(num_pages);
+
+	flags = ukplat_lcpu_save_irqf();
+	ukarch_spin_lock(&b->lock);
 	freelist_sanitycheck(b->free_head);
 
 	ord = num_pages_to_order(num_pages);
@@ -388,9 +400,13 @@ static void *bbuddy_palloc(struct uk_alloc *a, unsigned long num_pages)
 	uk_alloc_stats_count_palloc(a, (void *) alloc_ch, num_pages);
 	freelist_sanitycheck(b->free_head);
 
+	ukarch_spin_unlock(&b->lock);
+	ukplat_lcpu_restore_irqf(flags);
 	return (void *)alloc_ch;
 
 err_nomem:
+	ukarch_spin_unlock(&b->lock);
+	ukplat_lcpu_restore_irqf(flags);
 	uk_pr_warn("%p: Cannot handle palloc request of %lu: Out of memory\n",
 		   a, num_pages);
 
@@ -464,6 +480,7 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	struct uk_bbpalloc *const b = (struct uk_bbpalloc *)&a->priv;
 	char *base = obj;
 	size_t freed_pages;
+	unsigned long flags;
 	size_t ord;
 	struct chunk_head *ch;
 
@@ -473,6 +490,8 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	UK_ASSERT(IS_ALIGNED((uintptr_t)obj, __PAGE_SIZE));
 
 	uk_alloc_stats_count_pfree(a, obj, num_pages);
+	flags = ukplat_lcpu_save_irqf();
+	ukarch_spin_lock(&b->lock);
 	freelist_sanitycheck(b->free_head);
 
 	/* Since obj can span an arbitrary page range, we may need to return it
@@ -502,6 +521,8 @@ static void bbuddy_pfree(struct uk_alloc *a, void *obj, unsigned long num_pages)
 	} while (num_pages);
 
 	freelist_sanitycheck(b->free_head);
+	ukarch_spin_unlock(&b->lock);
+	ukplat_lcpu_restore_irqf(flags);
 }
 
 static long bbuddy_pmaxalloc(struct uk_alloc *a)
@@ -664,6 +685,7 @@ struct uk_alloc *uk_allocbbuddy_init(void *base, size_t len)
 	for (i = 0; i < FREELIST_SIZE; i++)
 		UK_INIT_HLIST_HEAD(&b->free_head[i]);
 	b->memr_head = NULL;
+	ukarch_spin_init(&b->lock);
 
 	/* initialize and register allocator interface */
 	uk_alloc_init_palloc(a, bbuddy_palloc, bbuddy_pfree,
