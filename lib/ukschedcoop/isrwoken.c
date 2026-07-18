@@ -11,10 +11,17 @@ void schedcoop_thread_woken_isr(struct uk_sched *s, struct uk_thread *t)
 
 	UK_ASSERT(ukplat_lcpu_irqs_disabled());
 
+	/* On a busy-poll worker scheduler this may run on a different CPU than
+	 * the one draining the run queue (a cross-core futex wake), so guard the
+	 * queues with the same lock schedcoop_schedule takes. */
+	if (c->busy_poll)
+		ukarch_spin_lock(&c->lock);
 	if (t->wakeup_time > 0)
 		UK_TAILQ_REMOVE(&c->sleep_queue, t, queue);
 	if (uk_thread_is_queueable(t) && uk_thread_is_runnable(t)) {
 		UK_TAILQ_INSERT_TAIL(&c->run_queue, t, queue);
 		uk_thread_clear_queueable(t);
 	}
+	if (c->busy_poll)
+		ukarch_spin_unlock(&c->lock);
 }

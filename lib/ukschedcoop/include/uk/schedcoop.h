@@ -49,6 +49,12 @@ struct uk_sched *uk_schedcoop_create(struct uk_alloc *a,
 				     struct uk_alloc *axusa,
 				     struct uk_alloc *tls_a);
 
+/* Mark [s] as a dedicated SMP worker-core scheduler: guard its queues for
+ * cross-core wakes and busy-poll the idle thread instead of halting. Call once
+ * after uk_schedcoop_create and before the scheduler runs another CPU's wakes.
+ */
+void uk_schedcoop_set_busy_poll(struct uk_sched *s);
+
 #ifdef __cplusplus
 }
 #endif

@@ -45,7 +45,11 @@ static void schedcoop_schedule(struct uk_sched *s)
 	__snsec now, min_wakeup_time;
 	unsigned long flags;
 
-	if (unlikely(ukplat_lcpu_irqs_disabled()))
+	/* A busy-poll worker core (see uk_schedcoop_set_busy_poll) runs with IRQs
+	 * masked: it never halts and drives wakeups by polling, so it needs no
+	 * timer or device interrupts. Only enforce the IRQs-enabled contract for a
+	 * normal (boot) scheduler. */
+	if (unlikely(!c->busy_poll && ukplat_lcpu_irqs_disabled()))
 		UK_CRASH("Must not call %s with IRQs disabled\n", __func__);
 
 	now = ukplat_monotonic_clock();
@@ -80,6 +84,12 @@ static void schedcoop_schedule(struct uk_sched *s)
 		}
 	}
 
+	/* Guard the run queue against a concurrent cross-core wake
+	 * (schedcoop_thread_woken_isr inserting from another CPU). Taken after
+	 * the sleep-queue scan above, which calls uk_thread_wake -> the same
+	 * locking woken path, so the lock is never held reentrantly here. */
+	if (c->busy_poll)
+		ukarch_spin_lock(&c->lock);
 	next = UK_TAILQ_FIRST(&c->run_queue);
 	if (next) {
 		UK_ASSERT(next != prev);
@@ -107,6 +117,8 @@ static void schedcoop_schedule(struct uk_sched *s)
 		next = &c->idle;
 		uk_sched_stats_idle_count_incr(s);
 	}
+	if (c->busy_poll)
+		ukarch_spin_unlock(&c->lock);
 
 	if (next != prev) {
 		/*
@@ -146,8 +158,19 @@ static int schedcoop_thread_add(struct uk_sched *s, struct uk_thread *t)
 	UK_ASSERT(!uk_thread_is_exited(t));
 
 	/* Add to run queue if runnable */
-	if (uk_thread_is_runnable(t))
+	if (uk_thread_is_runnable(t)) {
+		unsigned long flags = 0;
+
+		if (c->busy_poll) {
+			flags = ukplat_lcpu_save_irqf();
+			ukarch_spin_lock(&c->lock);
+		}
 		UK_TAILQ_INSERT_TAIL(&c->run_queue, t, queue);
+		if (c->busy_poll) {
+			ukarch_spin_unlock(&c->lock);
+			ukplat_lcpu_restore_irqf(flags);
+		}
+	}
 
 	return 0;
 }
@@ -158,8 +181,19 @@ static void schedcoop_thread_remove(struct uk_sched *s, struct uk_thread *t)
 
 	/* Remove from run_queue */
 	if (t != uk_thread_current()
-	    && uk_thread_is_runnable(t))
+	    && uk_thread_is_runnable(t)) {
+		unsigned long flags = 0;
+
+		if (c->busy_poll) {
+			flags = ukplat_lcpu_save_irqf();
+			ukarch_spin_lock(&c->lock);
+		}
 		UK_TAILQ_REMOVE(&c->run_queue, t, queue);
+		if (c->busy_poll) {
+			ukarch_spin_unlock(&c->lock);
+			ukplat_lcpu_restore_irqf(flags);
+		}
+	}
 }
 
 static void schedcoop_thread_blocked(struct uk_sched *s, struct uk_thread *t)
@@ -168,10 +202,14 @@ static void schedcoop_thread_blocked(struct uk_sched *s, struct uk_thread *t)
 
 	UK_ASSERT(ukplat_lcpu_irqs_disabled());
 
+	if (c->busy_poll)
+		ukarch_spin_lock(&c->lock);
 	if (t != uk_thread_current())
 		UK_TAILQ_REMOVE(&c->run_queue, t, queue);
 	if (t->wakeup_time > 0)
 		UK_TAILQ_INSERT_TAIL(&c->sleep_queue, t, queue);
+	if (c->busy_poll)
+		ukarch_spin_unlock(&c->lock);
 }
 
 static __noreturn void idle_thread_fn(void *argp)
@@ -218,7 +256,14 @@ static __noreturn void idle_thread_fn(void *argp)
 		wake_up_time = (volatile __nsec) c->idle_return_time;
 		now = ukplat_monotonic_clock();
 
-		if (!wake_up_time || wake_up_time > now) {
+		if (c->busy_poll) {
+			/* Dedicated SMP worker core: never halt. Unikraft has no
+			 * cross-core IPI to break a halt, so a futex wake from
+			 * another CPU (inserting this core's blocked thread into
+			 * the run queue) would go unobserved. Spin so the next
+			 * loop iteration sees the insert. */
+			ukarch_spinwait();
+		} else if (!wake_up_time || wake_up_time > now) {
 			if (wake_up_time)
 				ukplat_lcpu_halt_irq_until(wake_up_time);
 			else
@@ -261,7 +306,11 @@ static int schedcoop_start(struct uk_sched *s,
 	 *       a different thread is scheduled.
 	 */
 
-	ukplat_lcpu_enable_irq();
+	/* Keep IRQs masked on a busy-poll worker core: it polls for work and
+	 * cross-core wakes, so it needs no interrupts, and this avoids exercising
+	 * the per-CPU exception aux-stack path on a secondary lcpu. */
+	if (!c->busy_poll)
+		ukplat_lcpu_enable_irq();
 
 	return 0;
 }
@@ -293,6 +342,8 @@ struct uk_sched *uk_schedcoop_create(struct uk_alloc *a,
 
 	UK_TAILQ_INIT(&c->run_queue);
 	UK_TAILQ_INIT(&c->sleep_queue);
+	ukarch_spin_init(&c->lock);
+	c->busy_poll = 0;
 
 	/* Create idle thread */
 	rc = uk_thread_init_fn1(&c->idle,
@@ -329,4 +380,9 @@ err_free_c:
 	uk_free(a, c);
 err_out:
 	return NULL;
+}
+
+void uk_schedcoop_set_busy_poll(struct uk_sched *s)
+{
+	uksched2schedcoop(s)->busy_poll = 1;
 }
