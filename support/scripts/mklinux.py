@@ -43,6 +43,15 @@ def get_sym_val(elf, sym):
     return int(re_out[0], 16)
 
 
+# A static-PIE unikernel (OPTIMIZE_PIE) is ET_DYN and relocates itself at
+# runtime; a fixed-address one is ET_EXEC. e_type is the 2-byte little-endian
+# field at offset 16 of the ELF header (arm64 is little-endian).
+def elf_is_pie(elf):
+    with open(elf, "rb") as f:
+        f.seek(16)
+        return int.from_bytes(f.read(2), "little") == 3  # ET_DYN
+
+
 def main():
     parser = argparse.ArgumentParser()
     # description = "Prepends image with arm64 linux boot header."
@@ -85,10 +94,18 @@ def main():
 
     # load_offset
     #
-    # This includes the header, so we subtract the header size
-    LINUX_ARM64_HDR["LOAD_OFFS"][0] = (
-        img_base - ram_base
-    ) - LINUX_ARM64_HDR_SIZE
+    # A position-independent image relocates itself (libukreloc) from wherever
+    # the loader places it, so it loads at text_offset 0 -- required by the
+    # "image anywhere" flag (bit 3, set below) and by loaders that reject a
+    # nonzero text_offset (e.g. vz's VZLinuxBootLoader, EFI). A fixed-address
+    # image must land exactly at _base_addr, so its offset spans the header and
+    # the DTB reservation.
+    if elf_is_pie(opt.elf):
+        LINUX_ARM64_HDR["LOAD_OFFS"][0] = 0
+    else:
+        LINUX_ARM64_HDR["LOAD_OFFS"][0] = (
+            img_base - ram_base
+        ) - LINUX_ARM64_HDR_SIZE
 
     # kernel_flags
     #
