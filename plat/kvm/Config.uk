@@ -40,7 +40,7 @@ config KVM_BOOT_PROTO_MULTIBOOT
 
 config KVM_BOOT_PROTO_LXBOOT
 	bool "Lxboot"
-	depends on KVM_VMM_FIRECRACKER || (KVM_VMM_QEMU && ARCH_ARM_64)
+	depends on KVM_VMM_FIRECRACKER || KVM_VMM_VIRT_APPLE || (KVM_VMM_QEMU && ARCH_ARM_64)
 	help
 		Linux 64-bit Boot Protocol
 
@@ -123,6 +123,21 @@ config KVM_VMM_FIRECRACKER
 	imply LIBUKINTCTLR_GICV3 if ARCH_ARM_64
 	imply LIBUKRTC_PL031
 	depends on ARCH_X86_64 || ARCH_ARM_64
+
+config KVM_VMM_VIRT_APPLE
+	bool "Apple Virtualization.framework"
+	select KVM_BOOT_PROTO_LXBOOT
+	select HAVE_PCI
+	select HAVE_MMIO
+	imply LIBUKINTCTLR_GICV3
+	imply LIBUKRTC_PL031
+	depends on ARCH_ARM_64
+	help
+		Apple's Virtualization.framework (macOS, arm64). Its guest memory
+		map fixes RAM at 0x70000000 and presents virtio devices -- net,
+		the hvc0 console, entropy -- over PCI below RAM. There is no PL011,
+		so the platform registers no early console; a guest that wants
+		output drives the virtio-console PCI function itself.
 
 endchoice
 endif
