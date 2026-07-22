@@ -57,6 +57,27 @@ def elf_is_pie(elf):
     return elf_has_section(elf, ".uk_reloc")
 
 
+# The highest end address (vaddr + memsz) over the PT_LOAD segments. This is
+# the image's true memory footprint: p_memsz includes NOBITS (.bss), which the
+# raw binary's file size does not.
+def elf_load_end(elf):
+    with open(elf, "rb") as f:
+        hdr = f.read(64)
+        phoff = int.from_bytes(hdr[32:40], "little")
+        phentsize = int.from_bytes(hdr[54:56], "little")
+        phnum = int.from_bytes(hdr[56:58], "little")
+        end = 0
+        for i in range(phnum):
+            f.seek(phoff + i * phentsize)
+            ph = f.read(phentsize)
+            if int.from_bytes(ph[0:4], "little") != 1:  # PT_LOAD
+                continue
+            vaddr = int.from_bytes(ph[16:24], "little")
+            memsz = int.from_bytes(ph[40:48], "little")
+            end = max(end, vaddr + memsz)
+    return end
+
+
 def elf_has_section(elf, name):
     with open(elf, "rb") as f:
         hdr = f.read(64)
@@ -144,9 +165,12 @@ def main():
 
     # image_size
     #
-    # We arbitrarily set this to the image size aligned up to 2MiB; the header
-    # is inside the image.
-    total_size = os.path.getsize(opt.bin)
+    # The effective size of the loaded image (booting.txt): everything from the
+    # load base through the end of the highest PT_LOAD segment, so it covers
+    # NOBITS (.bss) beyond the raw binary. Loaders place the DTB and initrd
+    # right after this reservation (vz's VZLinuxBootLoader does); undersizing
+    # it puts the DTB inside .bss, where the boot-time zeroing destroys it.
+    total_size = max(os.path.getsize(opt.bin), elf_load_end(opt.elf) - img_base)
     LINUX_ARM64_HDR["IMAGE_SIZE"][0] = align_up(total_size, 2**21)
 
     # Patch the header over the space the linker script reserved at the start

@@ -66,17 +66,19 @@ ENTRY(start_mmu)
 	ldr x2, =TCR_INIT_FLAGS
 	msr tcr_el1, x2
 #else /* CONFIG_PAGING */
-	/* Get VIRT_BITS from id_aa64mmfr0_el1.PARange */
+	/* PARange is still needed for TCR_EL1.IPS below */
 	mrs x3, id_aa64mmfr0_el1
-	ur_ldr  x5, tcr_ips_bits
-	ubfx x4, x3, #0, #4
-	ldrb w4, [x5, x4]
-	cmp x4, #52
-	b.lt setup_tcr_el1
 	/*
-	 * We currently do not provide 5-level page tables used in
-	 * implementing 52-bit virtual addresing with 4K granularity, so we
-	 * enforce the max VA to 48-bit for PARange >= 52.
+	 * The boot page tables (arm64_bpt_l3_pt0) are four-level with a
+	 * level-0 root: a 48-bit virtual address space. T0SZ must describe
+	 * that geometry, not the physical range -- deriving it from PARange
+	 * makes a host with a narrow physical range (Apple's Virtualization
+	 * framework reports 36 bits) start translation at level 1, which
+	 * misreads the level-0 root and wedges the first post-enable fetch
+	 * in recursive translation faults. A 48-bit VA over a narrower
+	 * output range is architecturally valid; entries whose outputs
+	 * exceed PARange fault only if touched, and such a host has no
+	 * memory up there to touch.
 	 */
 	mov x4, #48
 setup_tcr_el1:
