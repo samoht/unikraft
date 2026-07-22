@@ -81,7 +81,12 @@ ENTRY(_libkvmplat_entry)
 	cbz	x19, 1f
 #endif /* !CONFIG_LIBUKRELOC */
 
-	ur_ldr	x0, _start_ram_addr
+	/* The maintenance range is the loaded image, [_base_addr, _end).
+	 * _start_ram_addr sits below it (the link-time DTB reservation), and
+	 * for a relocated image its runtime address can fall outside RAM,
+	 * where a cache operation takes an external abort.
+	 */
+	ur_ldr	x0, _base_addr
 	ur_ldr	x1, _end
 	sub	x1, x1, x0
 	bl	clean_and_invalidate_dcache_range
@@ -96,7 +101,7 @@ ENTRY(_libkvmplat_entry)
 #if CONFIG_LIBUKRELOC
 	b	1f
 0:
-	ur_ldr	x0, _start_ram_addr
+	ur_ldr	x0, _base_addr
 	ur_ldr	x1, _end
 	sub	x1, x1, x0
 	bl	invalidate_dcache_range

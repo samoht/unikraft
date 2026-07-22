@@ -113,12 +113,14 @@ def main():
     # where offs is encoded as "imm26" times 4, relatively
     # to the branch instruction
     #
-    pc = img_base - LINUX_ARM64_HDR_SIZE + 4
+    # The header occupies the first 64 bytes of the image itself (reserved by
+    # the linker script), so the branch runs from the image base.
+    pc = img_base + 4
     offs = entry - pc
 
     # offset must be <= +128M. We don't accept negative offsets
-    # here as the header always prepends the image.
-    assert (offs) <= ((1 << 26) / 2 - 1)
+    # here as the header starts the image.
+    assert 0 < (offs) <= ((1 << 26) / 2 - 1)
 
     LINUX_ARM64_HDR["CODE1"][0] = (0b101 << 26) | (int(offs / 4))
 
@@ -133,9 +135,7 @@ def main():
     if elf_is_pie(opt.elf):
         LINUX_ARM64_HDR["LOAD_OFFS"][0] = 0
     else:
-        LINUX_ARM64_HDR["LOAD_OFFS"][0] = (
-            img_base - ram_base
-        ) - LINUX_ARM64_HDR_SIZE
+        LINUX_ARM64_HDR["LOAD_OFFS"][0] = img_base - ram_base
 
     # kernel_flags
     #
@@ -144,13 +144,19 @@ def main():
 
     # image_size
     #
-    # We arbitrarily set this to header size + image size aligned up to 2MiB
-    total_size = os.path.getsize(opt.bin) + LINUX_ARM64_HDR_SIZE
+    # We arbitrarily set this to the image size aligned up to 2MiB; the header
+    # is inside the image.
+    total_size = os.path.getsize(opt.bin)
     LINUX_ARM64_HDR["IMAGE_SIZE"][0] = align_up(total_size, 2**21)
 
-    # Create final image
+    # Patch the header over the space the linker script reserved at the start
+    # of the image.
     with open(opt.bin, "r+b") as f:
-        img = f.read()
+        space = f.read(LINUX_ARM64_HDR_SIZE)
+        assert space == bytes(LINUX_ARM64_HDR_SIZE), (
+            "the first %d bytes of the image are not the reserved boot-header"
+            " space" % LINUX_ARM64_HDR_SIZE
+        )
         f.seek(0)
         for field in [k for k in LINUX_ARM64_HDR.keys()]:
             f.write(
@@ -158,7 +164,6 @@ def main():
                     LINUX_ARM64_HDR[field][1], "little"
                 )
             )
-        f.write(img)
 
 
 if __name__ == "__main__":

@@ -77,6 +77,14 @@ SECTIONS {
 	_text = .;
 	.text :
 	{
+		/* 64 bytes for the arm64 Linux boot header, patched in place by
+		 * mklinux.py. Keeping the header inside the image (as Linux does)
+		 * keeps every section at the address the loader placed it, so a
+		 * position-independent image stays page-aligned after
+		 * relocation; a header prepended to the file would shift the
+		 * whole image by its size instead.
+		 */
+		. = . + 0x40;
 		*(.text)
 		*(.text.*)
 	} :text
