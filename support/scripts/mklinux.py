@@ -43,13 +43,43 @@ def get_sym_val(elf, sym):
     return int(re_out[0], 16)
 
 
-# A static-PIE unikernel (OPTIMIZE_PIE) is ET_DYN and relocates itself at
-# runtime; a fixed-address one is ET_EXEC. e_type is the 2-byte little-endian
-# field at offset 16 of the ELF header (arm64 is little-endian).
+# A static-PIE unikernel (OPTIMIZE_PIE) relocates itself at boot (libukreloc),
+# so it loads at any base the loader picks. ET_DYN identifies it, but some
+# binutils stamp a fully static, no-dynamic-linker PIE link ET_EXEC, so e_type
+# alone under-detects; the .uk_reloc section is the actual load-anywhere
+# contract, so its presence identifies the image too. Both readers assume a
+# little-endian 64-bit ELF (the images this script wraps are arm64).
 def elf_is_pie(elf):
     with open(elf, "rb") as f:
         f.seek(16)
-        return int.from_bytes(f.read(2), "little") == 3  # ET_DYN
+        if int.from_bytes(f.read(2), "little") == 3:  # ET_DYN
+            return True
+    return elf_has_section(elf, ".uk_reloc")
+
+
+def elf_has_section(elf, name):
+    with open(elf, "rb") as f:
+        hdr = f.read(64)
+        shoff = int.from_bytes(hdr[40:48], "little")
+        shentsize = int.from_bytes(hdr[58:60], "little")
+        shnum = int.from_bytes(hdr[60:62], "little")
+        shstrndx = int.from_bytes(hdr[62:64], "little")
+        if shoff == 0 or shnum == 0 or shstrndx >= shnum:
+            return False
+        f.seek(shoff + shstrndx * shentsize)
+        strhdr = f.read(shentsize)
+        stroff = int.from_bytes(strhdr[24:32], "little")
+        strsize = int.from_bytes(strhdr[32:40], "little")
+        f.seek(stroff)
+        strtab = f.read(strsize)
+        want = name.encode()
+        for i in range(shnum):
+            f.seek(shoff + i * shentsize)
+            name_off = int.from_bytes(f.read(4), "little")
+            end = strtab.find(b"\x00", name_off)
+            if strtab[name_off:end] == want:
+                return True
+    return False
 
 
 def main():
