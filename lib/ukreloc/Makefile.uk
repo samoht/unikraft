@@ -17,5 +17,11 @@ LIBUKRELOC_ASFLAGS-y  += -DUK_USE_SECTION_SEGMENTS
 LIBUKRELOC_CFLAGS-y   += -DUK_USE_SECTION_SEGMENTS
 LIBUKRELOC_CXXFLAGS-y += -DUK_USE_SECTION_SEGMENTS
 
+# The relocator runs before the MMU is on, where every access goes to
+# Device-type memory and an unaligned load faults with no vector table
+# installed yet. The packed uk_reloc entries are 4-byte aligned at best, so
+# the compiler must not assume unaligned loads are tolerated.
+LIBUKRELOC_CFLAGS-$(CONFIG_ARCH_ARM_64) += -mstrict-align
+
 LIBUKRELOC_SRCS-$(CONFIG_LIBUKRELOC) += $(LIBUKRELOC_BASE)/reloc.lds.S
 LIBUKRELOC_SRCS-$(CONFIG_LIBUKRELOC) += $(LIBUKRELOC_BASE)/reloc.c
